@@ -1,6 +1,6 @@
 # Amazon Rewards Coupon Collector Chrome Extension
 
-This Chrome extension automatically collects all available coupons on the Amazon Rewards page (https://www.amazon.in/h/rewards).
+Chrome extension that automatically collects all available coupons on the Amazon Rewards page
 
 ## Installation
 
@@ -12,18 +12,11 @@ This Chrome extension automatically collects all available coupons on the Amazon
 
 ## Usage
 
-1. Navigate to https://www.amazon.in/h/rewards
+1. Navigate to rewards page (Click on "Open Rewards Page")
 2. Click the extension icon in the Chrome toolbar
 3. Click "Collect All Coupons"
 4. The extension will automatically click all "Collect Now" buttons with a 2-second delay between each click
 5. Check the browser console for progress updates
-
-## Files
-
-- `manifest.json` - Extension manifest
-- `content.js` - Content script that runs on the rewards page
-- `popup.html` - Extension popup interface
-- `popup.js` - Popup script for triggering collection
 
 ## Safety Note
 
