@@ -5,7 +5,8 @@
   "description": "Automatically collect all available coupons on Amazon Rewards page",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://www.amazon.in/*"

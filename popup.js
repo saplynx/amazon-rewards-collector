@@ -33,4 +33,9 @@ document.addEventListener('DOMContentLoaded', function() {
             statusDiv.style.color = 'red';
         }
     });
+
+    const openRewardsBtn = document.getElementById('openRewardsBtn');
+    openRewardsBtn.addEventListener('click', () => {
+        chrome.tabs.create({ url: "https://amzn.to/46zyQIR" });
+    });
 });
