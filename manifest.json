@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Amazon Rewards Coupon Collector",
+  "version": "1.0",
+  "description": "Automatically collect all available coupons on Amazon Rewards page",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.amazon.in/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Collect Coupons"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.amazon.in/h/rewards*"],
+      "js": ["content.js"]
+    }
+  ]
+}
