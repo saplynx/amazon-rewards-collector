@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Collection Summary - Amazon Rewards Collector</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg-color: #f3f4f6;
+      --card-bg: #ffffff;
+      --nav-bg: #131921;
+      --nav-text: #ffffff;
+      --text-dark: #111827;
+      --text-muted: #6b7280;
+      --border-color: #e5e7eb;
+      --progress-bg: #e5e7eb;
+      --progress-fill: #ff9900;
+      --table-header-bg: #f9fafb;
+      --table-row-hover: #f9fafb;
+      --btn-sec-bg: #ffffff;
+      --btn-sec-text: #111827;
+      --btn-sec-border: #d1d5db;
+      --btn-sec-hover: #f9fafb;
+      --btn-danger-hover: #fee2e2;
+      --success-green: #067d62;
+      --success-bg: #e6f4ea;
+      --primary: #ff9900;
+      --primary-hover: #e68a00;
+      --primary-text: #111827;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-color: #0b0f19;
+        --card-bg: #151d2f;
+        --nav-bg: #070b13;
+        --nav-text: #f8fafc;
+        --text-dark: #f8fafc;
+        --text-muted: #94a3b8;
+        --border-color: #243048;
+        --progress-bg: #243048;
+        --progress-fill: #f59e0b;
+        --table-header-bg: #1c263c;
+        --table-row-hover: #1e2a42;
+        --btn-sec-bg: #1c263c;
+        --btn-sec-text: #f8fafc;
+        --btn-sec-border: #334155;
+        --btn-sec-hover: #26334d;
+        --btn-danger-hover: rgba(239, 68, 68, 0.2);
+        --success-green: #10b981;
+        --success-bg: rgba(16, 185, 129, 0.15);
+        --primary: #f59e0b;
+        --primary-hover: #d97706;
+        --primary-text: #0f172a;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-dark);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    header {
+      background-color: var(--nav-bg);
+      color: var(--nav-text);
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, #ff9900, #ffb84d);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 20px;
+      color: #131921;
+    }
+
+    .brand h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .badge-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background-color: var(--success-bg);
+      color: var(--success-green);
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 20px;
+      transition: all 0.2s ease;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: currentColor;
+    }
+
+    .dot-pulse {
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+    }
+
+    .container {
+      max-width: 860px;
+      width: 100%;
+      margin: 28px auto;
+      padding: 0 20px;
+      flex: 1;
+    }
+
+    /* Live Progress Card */
+    .live-progress-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+
+    .live-progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .live-status-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--primary);
+    }
+
+    .progress-fraction {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .progress-track {
+      height: 10px;
+      background-color: var(--progress-bg);
+      border-radius: 5px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--primary), #ffb84d);
+      border-radius: 5px;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+
+    /* Completion Banner */
+    .banner {
+      background: linear-gradient(135deg, #055a47, #067d62);
+      color: #ffffff;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 12px rgba(6, 125, 98, 0.15);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .banner-text h2 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .banner-text p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .banner-icon {
+      font-size: 36px;
+      margin-left: 16px;
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+
+    .stat-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 34px;
+      font-weight: 800;
+      color: var(--text-dark);
+      line-height: 1.1;
+      margin-bottom: 6px;
+      transition: color 0.2s ease;
+    }
+
+    .stat-subtext {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Actions Bar */
+    .actions-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 11px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      transition: background-color 0.15s ease, transform 0.1s ease;
+      text-decoration: none;
+    }
+
+    .btn-primary {
+      background-color: var(--primary);
+      color: var(--primary-text);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background-color: var(--primary-hover);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background-color: var(--btn-sec-bg);
+      color: var(--btn-sec-text);
+      border: 1px solid var(--btn-sec-border);
+    }
+
+    .btn-secondary:hover {
+      background-color: var(--btn-sec-hover);
+    }
+
+    .btn-danger {
+      background-color: transparent;
+      color: #ef4444;
+      border: 1px solid transparent;
+      margin-left: auto;
+    }
+
+    .btn-danger:hover {
+      background-color: var(--btn-danger-hover);
+    }
+
+    /* History Card */
+    .history-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+
+    .history-card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: var(--text-dark);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
+      background-color: var(--table-header-bg);
+    }
+
+    td {
+      padding: 14px 16px;
+      font-size: 14px;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-dark);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background-color: var(--table-row-hover);
+    }
+
+    .empty-history {
+      padding: 32px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon">✓</div>
+      <h1>Amazon Rewards Collector</h1>
+    </div>
+    <div id="headerBadge" class="badge-status">
+      <span class="dot"></span>
+      <span id="badgeText">Ready</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Live Progress Section (Visible while running) -->
+    <div id="liveProgressContainer" class="live-progress-card" style="display: none;">
+      <div class="live-progress-header">
+        <div class="live-status-pill">
+          <span class="dot dot-pulse"></span>
+          <span id="liveStatusText">Collecting available coupons...</span>
+        </div>
+        <span id="liveProgressFraction" class="progress-fraction">0 / 0</span>
+      </div>
+      <div class="progress-track">
+        <div id="liveProgressBar" class="progress-fill"></div>
+      </div>
+    </div>
+
+    <!-- Done / Status Banner -->
+    <div id="statusBanner" class="banner" style="display: none;">
+      <div class="banner-text">
+        <h2 id="bannerTitle">All available coupons collected</h2>
+        <p id="bannerSubtext">Your session finished and the rewards page was closed automatically.</p>
+      </div>
+      <div id="bannerIcon" class="banner-icon">🎉</div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Collected This Session</div>
+        <div class="stat-value" id="sessionCount">0</div>
+        <div class="stat-subtext" id="sessionSubtext">Coupons activated in latest run</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Total Coupons Collected</div>
+        <div class="stat-value" id="totalCount">0</div>
+        <div class="stat-subtext">All-time lifetime activations</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Latest Activity</div>
+        <div class="stat-value" id="latestTime" style="font-size: 20px; padding-top: 8px;">--</div>
+        <div class="stat-subtext">Timestamp of last collection</div>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="actions-bar">
+      <button class="btn btn-primary" id="collectAgainBtn">
+        <span>🔄</span>
+        <span id="collectAgainBtnText">Collect Again</span>
+      </button>
+      <button class="btn btn-secondary" id="openRewardsBtn">
+        <span>🛒</span>
+        <span>Open Amazon Rewards</span>
+      </button>
+      <button class="btn btn-danger" id="resetStatsBtn">
+        <span>🗑️</span>
+        <span>Clear History</span>
+      </button>
+    </div>
+
+    <!-- Collection History -->
+    <div class="history-card">
+      <h3>Recent Collection History</h3>
+      <div id="historyTableContainer">
+        <table>
+          <thead>
+            <tr>
+              <th>Date & Time</th>
+              <th>Coupons Collected</th>
+              <th>Lifetime Total</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            <!-- Populated dynamically via summary.js -->
+          </tbody>
+        </table>
+        <div id="emptyHistoryMsg" class="empty-history" style="display: none;">
+          No collection sessions recorded yet.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Amazon Rewards Coupon Collector &bull; Automated rewards & cashback coupon activation
+  </footer>
+
+  <script src="summary.js"></script>
+</body>
+</html>
