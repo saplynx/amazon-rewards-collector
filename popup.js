@@ -2,6 +2,7 @@
 
 document.addEventListener('DOMContentLoaded', async () => {
     const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
     const progressBox = document.getElementById('progressBox');
     const progressLabel = document.getElementById('progressLabel');
@@ -17,9 +18,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const isRunning = appState.status === 'running';
 
-        // Start button state
+        // Start & Stop button states
         startBtn.disabled = isRunning;
         startBtn.textContent = isRunning ? 'Collecting...' : 'Start';
+        if (stopBtn) {
+            stopBtn.style.display = isRunning ? 'block' : 'none';
+        }
 
         // Status text
         statusDiv.textContent = appState.message || 'Click Start to collect all available rewards';
@@ -72,6 +76,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             startBtn.disabled = true;
             startBtn.textContent = 'Collecting...';
+            if (stopBtn) stopBtn.style.display = 'block';
             statusDiv.textContent = 'Opening Amazon Rewards...';
             statusDiv.style.color = '#f59e0b';
 
@@ -80,10 +85,27 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error('Error triggering start flow:', error);
             startBtn.disabled = false;
             startBtn.textContent = 'Start';
+            if (stopBtn) stopBtn.style.display = 'none';
             statusDiv.textContent = 'Unable to complete collection. Please try again.';
             statusDiv.style.color = '#ef4444';
         }
     });
+
+    // Stop collection
+    if (stopBtn) {
+        stopBtn.addEventListener('click', async () => {
+            try {
+                stopBtn.disabled = true;
+                stopBtn.textContent = 'Stopping...';
+                await chrome.runtime.sendMessage({ action: 'stop' });
+            } catch (err) {
+                console.error('Error stopping flow:', err);
+            } finally {
+                stopBtn.disabled = false;
+                stopBtn.textContent = 'Stop';
+            }
+        });
+    }
 
     // View summary link
     if (viewSummaryLink) {

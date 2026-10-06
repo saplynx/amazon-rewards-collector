@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Action buttons
     const collectAgainBtn = document.getElementById('collectAgainBtn');
     const collectAgainBtnText = document.getElementById('collectAgainBtnText');
+    const stopCollectionBtn = document.getElementById('stopCollectionBtn');
     const openRewardsBtn = document.getElementById('openRewardsBtn');
     const resetStatsBtn = document.getElementById('resetStatsBtn');
 
@@ -73,9 +74,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 sessionSubtextEl.textContent = `${sessionCount} new coupon${sessionCount > 1 ? 's' : ''} activated`;
             }
 
-            // Update action button
+            // Update action buttons
             collectAgainBtn.disabled = isRunning;
             collectAgainBtnText.textContent = isRunning ? 'Collecting...' : 'Collect Again';
+            if (stopCollectionBtn) {
+                stopCollectionBtn.style.display = isRunning ? 'inline-flex' : 'none';
+            }
 
             // Live progress & status rendering
             if (isRunning) {
@@ -116,8 +120,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 liveProgressContainer.style.display = 'none';
                 statusBanner.style.display = 'flex';
                 statusBanner.style.background = 'linear-gradient(135deg, #7f1d1d, #b91c1c)';
-                bannerTitle.textContent = 'Unable to complete collection';
-                bannerSubtext.textContent = 'Please verify your Amazon connection or login and try again.';
+                bannerTitle.textContent = appState.phase === 'login_required' 
+                    ? 'Amazon Login Required' 
+                    : 'Unable to complete collection';
+                bannerSubtext.textContent = appState.message || 'Please verify your Amazon connection or login and try again.';
                 bannerIcon.textContent = '⚠️';
 
                 headerBadge.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
@@ -196,6 +202,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             collectAgainBtnText.textContent = 'Collect Again';
         }
     });
+
+    // Handle "Stop"
+    if (stopCollectionBtn) {
+        stopCollectionBtn.addEventListener('click', async () => {
+            try {
+                stopCollectionBtn.disabled = true;
+                await chrome.runtime.sendMessage({ action: 'stop' });
+            } catch (err) {
+                console.error('Failed to stop collection:', err);
+            } finally {
+                stopCollectionBtn.disabled = false;
+            }
+        });
+    }
 
     // Handle "Open Amazon Rewards"
     openRewardsBtn.addEventListener('click', () => {

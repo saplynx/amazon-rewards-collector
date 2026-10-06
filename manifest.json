@@ -25,7 +25,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.amazon.in/h/rewards*"],
+      "matches": [
+        "https://www.amazon.in/h/rewards*",
+        "https://amazon.in/h/rewards*"
+      ],
       "js": ["content.js"]
     }
   ]
