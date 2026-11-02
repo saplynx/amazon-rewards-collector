@@ -13,21 +13,6 @@ function getRandomDelay(min, max) {
 }
 
 /**
- * Generate a unique tracking key for a coupon button to avoid duplicate clicks
- */
-function getButtonKey(button) {
-    if (!button) return '';
-    const couponId = button.getAttribute('data-coupon-id') ||
-                     button.closest('[data-coupon-id]')?.getAttribute('data-coupon-id') ||
-                     (button.id && button.id.startsWith('amzn1.rewards.reward.') ? button.id : null);
-    if (couponId) return couponId;
-
-    const rect = button.getBoundingClientRect();
-    const text = (button.innerText || button.textContent || '').trim();
-    return `${text}_${Math.round(rect.top + window.scrollY)}_${Math.round(rect.left + window.scrollX)}`;
-}
-
-/**
  * Query DOM recursively including shadow roots if present
  */
 function querySelectorAllDeep(selector, root = document) {
@@ -42,82 +27,136 @@ function querySelectorAllDeep(selector, root = document) {
 }
 
 /**
+ * Resolve unique coupon ID by searching up the DOM and across Shadow DOM boundaries
+ */
+function getCouponId(el) {
+    let curr = el;
+    while (curr) {
+        const id = curr.getAttribute?.('data-coupon-id') ||
+                   (curr.id && curr.id.startsWith('amzn1.rewards.reward.') ? curr.id : null);
+        if (id) return id;
+        curr = curr.parentElement || (curr.getRootNode && curr.getRootNode() !== document ? curr.getRootNode().host : null);
+    }
+    return null;
+}
+
+/**
+ * Check if an element is a valid, active Collect / Claim button
+ */
+function isCollectButton(el) {
+    if (!el) return false;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+
+    // Check display/visibility
+    if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+    }
+
+    // Exclude invalid container or state classes (e.g. unrevealed scratch cards, claimed cards)
+    if (el.closest('.redeem-btn, .claim-code-btn, .claimed-state, .expired-state, .hidden, .sc-hidden, .sc-display-none, .sc-cover-container')) {
+        return false;
+    }
+
+    // Check if within unclaimed container that is marked hidden
+    const unclaimed = el.closest('.unclaimed-state');
+    if (unclaimed && (unclaimed.classList.contains('hidden') || unclaimed.style.display === 'none')) {
+        return false;
+    }
+
+    // Check if within CTA section where claimed-state is active and not hidden
+    const cta = el.closest('.cta-section, .offer-cta');
+    if (cta) {
+        const claimed = cta.querySelector('.claimed-state');
+        if (claimed && !claimed.classList.contains('hidden') && claimed.style.display !== 'none') {
+            return false;
+        }
+    }
+
+    // Exclude external third-party merchant links (e.g. boAt, Lenskart target="_blank" with dest=)
+    const link = el.tagName.toLowerCase() === 'a' ? el : el.closest('a');
+    if (link && (link.target === '_blank' || (link.href && (link.href.includes('dest=') || link.href.includes('/r?aid=') || !link.href.includes('amazon.in'))))) {
+        return false;
+    }
+
+    const text = (el.innerText || el.textContent || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+    // Must not be already collected / redeemed / shopping cta
+    if (
+        text.includes('collected') ||
+        text.includes('claimed') ||
+        text.includes('already collected') ||
+        text.includes('view offer') ||
+        text.includes('shop now') ||
+        text.includes('buy now') ||
+        text.includes('order now') ||
+        text.includes('unlocked') ||
+        text.includes('available to use') ||
+        text.includes('redeem')
+    ) {
+        return false;
+    }
+
+    // Must match collect / claim phrasing
+    const matchesCollect = (
+        text === 'collect' ||
+        text === 'collect now' ||
+        text === 'collect offer' ||
+        text === 'collect coupon' ||
+        text === 'collect reward' ||
+        text === 'claim' ||
+        text === 'claim now' ||
+        text === 'claim offer' ||
+        /\b(collect|claim)\b/i.test(text)
+    );
+
+    return matchesCollect;
+}
+
+/**
+ * Find all uncollected reward/coupon buttons currently present in the DOM (including inside shadow roots)
+ */
+function findCollectButtons(root = document) {
+    const candidates = querySelectorAllDeep(
+        'button, [role="button"], input[type="button"], input[type="submit"], a.a-button-text, .a-button, .a-button-inner, .offer-cta, [data-action="collect"], .collect-coupon-btn, [data-coupon-id]',
+        root
+    );
+
+    const validButtons = [];
+    for (const el of candidates) {
+        // Exclude image wrappers and non-action containers
+        if (el.classList && (el.classList.contains('reward-ad-image-click-dp') || el.classList.contains('sc-cover-container'))) {
+            continue;
+        }
+
+        let target = el;
+        if (el.tagName.toLowerCase() !== 'button' && el.tagName.toLowerCase() !== 'input') {
+            const btn = el.closest('button, [role="button"], input, a') || el.querySelector('button, [role="button"], input');
+            if (btn) target = btn;
+        }
+
+        if (isCollectButton(target) && !validButtons.includes(target)) {
+            validButtons.push(target);
+        }
+    }
+
+    return validButtons;
+}
+
+/**
  * Check if a button has already been clicked, collected, or claimed
  */
-function isCollectedOrClicked(button, clickedKeys) {
+function isCollectedOrClicked(button, collectedCouponIds) {
     if (!button) return true;
     if (button.dataset.arcCollected === 'true') return true;
 
     const parentBtn = button.closest('.a-button');
     if (parentBtn && parentBtn.dataset.arcCollected === 'true') return true;
 
-    // Check if within unclaimed container that is marked hidden
-    const unclaimed = button.closest('.unclaimed-state');
-    if (unclaimed && unclaimed.classList.contains('hidden')) return true;
+    const couponId = getCouponId(button);
+    if (couponId && collectedCouponIds.has(couponId)) return true;
 
-    // Check if within CTA section where claimed-state is active and not hidden
-    const cta = button.closest('.cta-section');
-    if (cta) {
-        const claimed = cta.querySelector('.claimed-state');
-        if (claimed && !claimed.classList.contains('hidden')) return true;
-    }
-
-    const key = getButtonKey(button);
-    if (key && clickedKeys.has(key)) return true;
-
-    const currentText = (button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (
-        currentText.includes('collected') ||
-        currentText.includes('view offer') ||
-        currentText.includes('redeem') ||
-        currentText.includes('shop now') ||
-        currentText.includes('buy now') ||
-        currentText.includes('order now') ||
-        currentText.includes('unlocked') ||
-        currentText.includes('available to use')
-    ) {
-        return true;
-    }
-
-    return false;
-}
-
-/**
- * Find all uncollected reward/coupon buttons currently present in the DOM.
- * Targets actual action elements without matching parent wrappers.
- */
-function findCollectButtons() {
-    const candidateElements = querySelectorAllDeep(
-        'button.a-button-text, button[id^="amzn1.rewards.reward."], button[data-coupon-id], .offer-cta button, a.a-button-text, a.coupon-action-btn, a[data-action="collect"], .collect-coupon-btn button, .collect-coupon-btn a'
-    );
-
-    const validButtons = [];
-
-    for (const el of candidateElements) {
-        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') {
-            continue;
-        }
-
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') {
-            continue;
-        }
-
-        const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-        const isCollect = (
-            rawText === 'collect now' ||
-            rawText === 'collect offer' ||
-            rawText === 'collect' ||
-            (rawText.startsWith('collect') && !rawText.includes('collected') && !rawText.includes('collection'))
-        );
-
-        if (isCollect && !validButtons.includes(el)) {
-            validButtons.push(el);
-        }
-    }
-
-    return validButtons;
+    return !isCollectButton(button);
 }
 
 /**
@@ -126,7 +165,7 @@ function findCollectButtons() {
 async function scrollToCoupon(button) {
     if (!button) return;
 
-    // 1. Center the button smoothly in the viewport (block: vertical, inline: horizontal)
+    // Center button smoothly in viewport
     try {
         button.scrollIntoView({
             behavior: 'smooth',
@@ -139,13 +178,13 @@ async function scrollToCoupon(button) {
         } catch (err) {}
     }
 
-    // 2. Also ensure any scrollable horizontal parent container (e.g. mobile carousel) is aligned
+    // Align any horizontal scrollable container (e.g. mobile carousels)
     let parent = button.parentElement;
     while (parent && parent !== document.body) {
         if (parent.scrollWidth > parent.clientWidth + 10) {
             const btnRect = button.getBoundingClientRect();
             const parentRect = parent.getBoundingClientRect();
-            if (btnRect.left < parentRect.left + 20 || btnRect.right > parentRect.right - 20) {
+            if (btnRect.left < parentRect.left + 15 || btnRect.right > parentRect.right - 15) {
                 const targetScrollLeft = parent.scrollLeft + (btnRect.left - parentRect.left) - (parentRect.width / 2) + (btnRect.width / 2);
                 parent.scrollTo({
                     left: Math.max(0, targetScrollLeft),
@@ -154,29 +193,31 @@ async function scrollToCoupon(button) {
             }
             break;
         }
-        parent = parent.parentElement;
+        parent = parent.parentElement || (parent.getRootNode && parent.getRootNode() !== document ? parent.getRootNode().host : null);
     }
 
-    // 3. Human gaze & scroll settle pause (180ms - 320ms)
-    await sleep(getRandomDelay(180, 320));
+    await sleep(getRandomDelay(150, 250));
 }
 
 /**
- * Simulate human mouse movement, hover, jitter, and click sequence
+ * Simulate human mouse & touch click sequence on button
  */
-async function simulateHumanClick(button) {
+async function simulateHumanClick(button, collectedCouponIds) {
     if (!button) return;
 
+    // Mark collected immediately
     button.dataset.arcCollected = 'true';
-    const parentBtn = button.closest('.a-button');
-    if (parentBtn) parentBtn.dataset.arcCollected = 'true';
+    const parent = button.parentElement || (button.getRootNode && button.getRootNode() !== document ? button.getRootNode().host : null);
+    if (parent && parent.dataset) parent.dataset.arcCollected = 'true';
 
-    // Calculate natural click target with random jitter (within 25% to 75% of button bounds)
+    const couponId = getCouponId(button);
+    if (couponId) {
+        collectedCouponIds.add(couponId);
+    }
+
     const rect = button.getBoundingClientRect();
-    const jitterX = rect.width * (0.25 + Math.random() * 0.5);
-    const jitterY = rect.height * (0.25 + Math.random() * 0.5);
-    const clientX = Math.round(rect.left + Math.max(2, Math.min(rect.width - 2, jitterX)));
-    const clientY = Math.round(rect.top + Math.max(2, Math.min(rect.height - 2, jitterY)));
+    const clientX = Math.round(rect.left + (rect.width > 0 ? rect.width / 2 : 10));
+    const clientY = Math.round(rect.top + (rect.height > 0 ? rect.height / 2 : 10));
     const screenX = window.screenX + clientX;
     const screenY = window.screenY + clientY;
 
@@ -190,82 +231,136 @@ async function simulateHumanClick(button) {
         screenY
     };
 
-    // 1. Human mouse move & hover
-    button.dispatchEvent(new MouseEvent('mousemove', { ...baseEventInit, buttons: 0 }));
-    button.dispatchEvent(new MouseEvent('mouseenter', { ...baseEventInit, buttons: 0 }));
-    button.dispatchEvent(new MouseEvent('mouseover', { ...baseEventInit, buttons: 0 }));
+    // Pointer events (Mobile / Touch listeners)
+    try {
+        button.dispatchEvent(new PointerEvent('pointerover', { ...baseEventInit, pointerType: 'touch' }));
+        button.dispatchEvent(new PointerEvent('pointerenter', { ...baseEventInit, pointerType: 'touch' }));
+        button.dispatchEvent(new PointerEvent('pointerdown', { ...baseEventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
+    } catch (e) {}
 
-    // Slight hesitation before press (50ms - 120ms)
-    await sleep(getRandomDelay(50, 120));
+    // Mouse events (Desktop listeners)
+    try {
+        button.dispatchEvent(new MouseEvent('mouseover', { ...baseEventInit, buttons: 0 }));
+        button.dispatchEvent(new MouseEvent('mouseenter', { ...baseEventInit, buttons: 0 }));
+        button.dispatchEvent(new MouseEvent('mousedown', { ...baseEventInit, button: 0, buttons: 1 }));
+    } catch (e) {}
 
-    // 2. Mouse button down
-    button.dispatchEvent(new MouseEvent('mousedown', { ...baseEventInit, button: 0, buttons: 1 }));
+    await sleep(getRandomDelay(40, 80));
 
-    // Human click hold jitter (40ms - 85ms)
-    await sleep(getRandomDelay(40, 85));
+    try {
+        button.dispatchEvent(new PointerEvent('pointerup', { ...baseEventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
+    } catch (e) {}
 
-    // 3. Mouse button release
-    button.dispatchEvent(new MouseEvent('mouseup', { ...baseEventInit, button: 0, buttons: 0 }));
+    try {
+        button.dispatchEvent(new MouseEvent('mouseup', { ...baseEventInit, button: 0, buttons: 0 }));
+    } catch (e) {}
 
-    // 4. Click execution
+    // Native DOM click
     try {
         button.click();
     } catch (e) {
-        button.dispatchEvent(new MouseEvent('click', { ...baseEventInit, button: 0, buttons: 0 }));
+        try {
+            button.dispatchEvent(new MouseEvent('click', { ...baseEventInit, button: 0, buttons: 0 }));
+        } catch (err) {}
     }
 }
 
 /**
- * Previous mechanism of scrolling to dynamically trigger lazy loading of all reward cards across the page
+ * Expand fragment "Load more" buttons if present
  */
-async function scrollToLoadAllCoupons(isTimeUp) {
-    // 1. Progressively scroll down the page to trigger lazy loading of rewards cards
-    const totalHeight = Math.max(document.body.scrollHeight || 4000, document.documentElement.scrollHeight || 4000, 3600);
-    const scrollStep = 350;
-    for (let pos = scrollStep; pos <= totalHeight; pos += scrollStep) {
-        if ((isTimeUp && isTimeUp()) || abortRequested) break;
-        window.scrollBy({ top: scrollStep, behavior: 'smooth' });
-        await sleep(getRandomDelay(200, 350));
-    }
-
-    // 2. Trigger horizontal card carousels so lazy cards render
-    const carousels = document.querySelectorAll(
-        '.carousel-scroller-card-list-container, [role="list"].remove-scrollbars, .coupons-wrap'
+function expandLoadMoreButtons() {
+    const moreButtons = querySelectorAllDeep(
+        '.fragment-load-more-button, .fragment-load-more-button input, .fragment-load-more-button .a-button-text, button[data-action="load-more"], a[data-action="load-more"]'
     );
-    for (const c of carousels) {
-        if (c.scrollWidth > c.clientWidth) {
-            c.scrollLeft = c.scrollWidth;
-        }
-    }
-
-    // 3. Expand fragment buttons if present
-    const fragmentButtons = document.querySelectorAll(
-        '.fragment-load-more-button, .fragment-load-more-button input, .fragment-load-more-button .a-button-text'
-    );
-    for (const btn of fragmentButtons) {
+    for (const btn of moreButtons) {
         if (btn && btn.dataset.arcExpanded !== 'true') {
             btn.dataset.arcExpanded = 'true';
             try { btn.click(); } catch (e) {}
         }
     }
+}
 
-    // 4. Smoothly scroll back to top with human delay
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    await sleep(getRandomDelay(400, 600));
+/**
+ * Sweep horizontal carousels visible in the viewport to reveal and collect offscreen cards
+ */
+async function sweepCarouselsInView(collectedCouponIds, onCollect, isTimeUp) {
+    const carousels = querySelectorAllDeep(
+        'tux-slider, .carousel-scroller-card-list-container, .coupons-wrap, [role="list"].remove-scrollbars, .a-carousel, .a-carousel-viewport, .a-carousel-container, .carousel-mobile'
+    );
 
-    // 5. Polling retry loop if buttons take a moment to render
-    let buttons = findCollectButtons();
-    let retries = 0;
-    while (buttons.length === 0 && retries < 5 && !abortRequested && (!isTimeUp || !isTimeUp())) {
-        window.scrollBy({ top: 200, behavior: 'smooth' });
-        await sleep(getRandomDelay(600, 900));
-        buttons = findCollectButtons();
-        retries++;
+    for (const c of carousels) {
+        if (abortRequested || (isTimeUp && isTimeUp())) break;
+
+        const rect = c.getBoundingClientRect();
+        // Skip if outside vertical view
+        if (rect.bottom < -200 || rect.top > window.innerHeight + 200) {
+            continue;
+        }
+
+        // Advance standard Amazon AUI desktop carousel if next button exists
+        const carouselContainer = c.closest('.a-carousel-container') || c;
+        const nextBtn = carouselContainer.querySelector?.('.a-carousel-goto-nextpage, .a-carousel-right');
+
+        if (c.scrollWidth <= c.clientWidth + 15 && !nextBtn) {
+            continue;
+        }
+
+        const maxScrollLeft = Math.max(0, c.scrollWidth - c.clientWidth);
+        const step = Math.max(250, Math.floor((c.clientWidth || 350) * 0.75));
+
+        // Scroll native overflow carousels
+        if (maxScrollLeft > 0) {
+            for (let left = 0; left <= maxScrollLeft + step; left += step) {
+                if (abortRequested || (isTimeUp && isTimeUp())) break;
+
+                c.scrollTo({ left: Math.min(left, maxScrollLeft), behavior: 'smooth' });
+                await sleep(getRandomDelay(120, 200));
+
+                const carouselButtons = findCollectButtons(c);
+                const uncollected = carouselButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
+
+                for (const btn of uncollected) {
+                    if (abortRequested || (isTimeUp && isTimeUp())) break;
+                    if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
+
+                    await scrollToCoupon(btn);
+                    await simulateHumanClick(btn, collectedCouponIds);
+                    onCollect();
+                    await sleep(getRandomDelay(250, 450));
+                }
+
+                if (left >= maxScrollLeft) break;
+            }
+        }
+
+        // Advance AUI paged carousels if next button is active
+        if (nextBtn && !nextBtn.classList.contains('a-disabled')) {
+            for (let p = 0; p < 4; p++) {
+                if (abortRequested || (isTimeUp && isTimeUp())) break;
+                if (nextBtn.classList.contains('a-disabled')) break;
+
+                const carouselButtons = findCollectButtons(carouselContainer);
+                const uncollected = carouselButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
+
+                for (const btn of uncollected) {
+                    if (abortRequested || (isTimeUp && isTimeUp())) break;
+                    if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
+
+                    await scrollToCoupon(btn);
+                    await simulateHumanClick(btn, collectedCouponIds);
+                    onCollect();
+                    await sleep(getRandomDelay(250, 450));
+                }
+
+                try { nextBtn.click(); } catch (e) {}
+                await sleep(getRandomDelay(300, 450));
+            }
+        }
     }
 }
 
 /**
- * Main collection controller with human mouse simulation, horizontal scrolling, and safety bounds
+ * Main collection controller: progressive downward sweep with horizontal carousel processing
  */
 async function collectAllCoupons() {
     if (isCollecting) {
@@ -274,78 +369,111 @@ async function collectAllCoupons() {
 
     isCollecting = true;
     abortRequested = false;
-    console.log('Starting Amazon rewards coupon collection with human simulation...');
+    console.log('Starting Amazon Rewards coupon collection with progressive sweep...');
 
     const startTime = Date.now();
-    const MAX_DURATION_MS = 180000; // 3-minute hard ceiling for overall execution safety
+    const MAX_DURATION_MS = 170000; // Under 180s background ceiling
     const isTimeUp = () => (Date.now() - startTime) >= MAX_DURATION_MS;
 
-    chrome.runtime.sendMessage({
-        action: 'collectionProgress',
-        current: 0,
-        total: 0,
-        sessionCollected: 0,
-        message: 'Scrolling to load all rewards...'
-    }).catch(() => {});
-
-    // Execute previous progressive scroll mechanism to trigger lazy-loading
-    await scrollToLoadAllCoupons(isTimeUp);
-
-    const clickedKeys = new Set();
+    const collectedCouponIds = new Set();
     let collectedCount = 0;
 
-    // Up to 2 collection passes (sweep + verify)
-    for (let pass = 0; pass < 2; pass++) {
-        if (isTimeUp() || abortRequested) break;
+    const notifyProgress = (msg) => {
+        chrome.runtime.sendMessage({
+            action: 'collectionProgress',
+            current: collectedCount,
+            total: Math.max(collectedCount, collectedCount + 5),
+            sessionCollected: collectedCount,
+            message: msg || `Collected ${collectedCount} reward${collectedCount === 1 ? '' : 's'}...`
+        }).catch(() => {});
+    };
 
-        const allButtons = findCollectButtons();
-        const uncollected = allButtons.filter(btn => !isCollectedOrClicked(btn, clickedKeys));
+    notifyProgress('Scanning rewards page...');
 
-        console.log(`Pass ${pass + 1}: Found ${allButtons.length} buttons, ${uncollected.length} uncollected.`);
+    // 1. Start from the top
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    await sleep(400);
 
-        if (uncollected.length === 0) {
-            break;
-        }
+    // 2. Progressive downward sweep
+    const SCROLL_STEP = 400;
+    let noNewContentChecks = 0;
 
-        for (let i = 0; i < uncollected.length; i++) {
-            if (isTimeUp() || abortRequested) break;
+    while (!abortRequested && !isTimeUp()) {
+        // Expand any load-more fragment buttons
+        expandLoadMoreButtons();
 
-            const button = uncollected[i];
-            if (isCollectedOrClicked(button, clickedKeys)) continue;
-
-            const key = getButtonKey(button);
-            clickedKeys.add(key);
-
-            // 1. Scroll horizontally and vertically to center the coupon
-            await scrollToCoupon(button);
-            if (isTimeUp() || abortRequested) break;
-
-            // 2. Perform human-like mouse simulation click with jitter
-            await simulateHumanClick(button);
+        // Check horizontal carousels in view
+        await sweepCarouselsInView(collectedCouponIds, () => {
             collectedCount++;
+            notifyProgress();
+        }, isTimeUp);
 
-            // 3. Notify extension of progress
-            chrome.runtime.sendMessage({
-                action: 'collectionProgress',
-                current: collectedCount,
-                total: Math.max(allButtons.length, collectedCount),
-                sessionCollected: collectedCount,
-                message: `Collecting coupon ${collectedCount}...`
-            }).catch(() => {});
+        // Find and collect all buttons in view
+        const currentButtons = findCollectButtons();
+        const uncollected = currentButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
 
-            // 4. Natural human interval before moving to next action (350ms - 650ms)
-            await sleep(getRandomDelay(350, 650));
+        for (const btn of uncollected) {
+            if (abortRequested || isTimeUp()) break;
+            if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
+
+            await scrollToCoupon(btn);
+            if (abortRequested || isTimeUp()) break;
+
+            await simulateHumanClick(btn, collectedCouponIds);
+            collectedCount++;
+            notifyProgress();
+
+            await sleep(getRandomDelay(280, 500));
         }
 
-        if (!isTimeUp() && !abortRequested && pass === 0) {
-            await sleep(getRandomDelay(400, 700)); // Allow DOM to settle before quick verification pass
+        // Check if we've reached the bottom of the document
+        const scrollBottom = window.scrollY + window.innerHeight;
+        const docHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
+
+        if (scrollBottom >= docHeight - 30) {
+            // Wait to see if infinite scroll loads more content
+            await sleep(700);
+            const newDocHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
+            if (newDocHeight > docHeight + 80) {
+                window.scrollBy({ top: SCROLL_STEP, behavior: 'smooth' });
+                await sleep(350);
+                noNewContentChecks = 0;
+                continue;
+            } else {
+                noNewContentChecks++;
+                if (noNewContentChecks >= 2) {
+                    break; // Truly at bottom
+                }
+            }
+        }
+
+        // Scroll down to reveal next section
+        window.scrollBy({ top: SCROLL_STEP, behavior: 'smooth' });
+        await sleep(getRandomDelay(220, 380));
+    }
+
+    // 3. One quick upward verification pass to collect any late-rendered items
+    if (!abortRequested && !isTimeUp()) {
+        const remainingButtons = findCollectButtons().filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
+        if (remainingButtons.length > 0) {
+            console.log(`Verification pass: Collecting ${remainingButtons.length} additional coupons...`);
+            for (const btn of remainingButtons) {
+                if (abortRequested || isTimeUp()) break;
+                if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
+
+                await scrollToCoupon(btn);
+                await simulateHumanClick(btn, collectedCouponIds);
+                collectedCount++;
+                notifyProgress();
+                await sleep(getRandomDelay(280, 480));
+            }
         }
     }
 
     isCollecting = false;
     const finishedMessage = abortRequested
         ? 'Collection stopped.'
-        : 'All available coupons collected.';
+        : `All available coupons collected (${collectedCount} total).`;
 
     console.log(`Collection complete. Total collected: ${collectedCount} in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
 

@@ -1,6 +1,7 @@
 // Background service worker for Amazon Rewards Coupon Collector
 
-const REWARDS_LINK = "https://amzn.to/46zyQIR";
+const REWARDS_LINK = "https://www.amazon.in/h/rewards";
+const AFFILIATE_LINK = "https://amzn.to/46zyQIR";
 const TARGET_WIDTH = 393;
 const TARGET_HEIGHT = 852;
 const MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
@@ -117,44 +118,52 @@ async function emulateMobileView(tabId) {
             attachedTabs.add(tabId);
         } catch (err) {
             if (!err.message?.includes('already attached')) {
-                throw err;
+                console.warn('Could not attach debugger:', err);
+                return;
             }
             attachedTabs.add(tabId);
         }
     }
 
     // Set mobile viewport resolution (393 x 852)
-    await chrome.debugger.sendCommand(debuggee, "Emulation.setDeviceMetricsOverride", {
-        width: TARGET_WIDTH,
-        height: TARGET_HEIGHT,
-        deviceScaleFactor: 3,
-        mobile: true,
-        screenOrientation: {
-            type: "portraitPrimary",
-            angle: 0
-        }
-    });
+    try {
+        await chrome.debugger.sendCommand(debuggee, "Emulation.setDeviceMetricsOverride", {
+            width: TARGET_WIDTH,
+            height: TARGET_HEIGHT,
+            deviceScaleFactor: 3,
+            mobile: true,
+            screenOrientation: {
+                type: "portraitPrimary",
+                angle: 0
+            }
+        });
+    } catch (e) {
+        console.warn('Emulation.setDeviceMetricsOverride warning:', e);
+    }
 
     // Enable touch events
-    await chrome.debugger.sendCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
-        enabled: true,
-        maxTouchPoints: 5
-    });
+    try {
+        await chrome.debugger.sendCommand(debuggee, "Emulation.setTouchEmulationEnabled", {
+            enabled: true,
+            maxTouchPoints: 5
+        });
+    } catch (e) {
+        console.warn('Emulation.setTouchEmulationEnabled warning:', e);
+    }
 
     // Override User Agent to Mobile Safari/iPhone
     try {
         await chrome.debugger.sendCommand(debuggee, "Network.enable");
     } catch (e) {}
 
-    await chrome.debugger.sendCommand(debuggee, "Emulation.setUserAgentOverride", {
-        userAgent: MOBILE_USER_AGENT,
-        platform: "iPhone"
-    });
-
-    await chrome.debugger.sendCommand(debuggee, "Network.setUserAgentOverride", {
-        userAgent: MOBILE_USER_AGENT,
-        platform: "iPhone"
-    });
+    try {
+        await chrome.debugger.sendCommand(debuggee, "Emulation.setUserAgentOverride", {
+            userAgent: MOBILE_USER_AGENT,
+            platform: "iPhone"
+        });
+    } catch (e) {
+        console.warn('Emulation.setUserAgentOverride warning:', e);
+    }
 }
 
 /**
@@ -181,6 +190,17 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
         }
 
         chrome.tabs.onUpdated.addListener(listener);
+
+        // Immediate check in case tab is already complete
+        chrome.tabs.get(tabId).then(tab => {
+            if (tab && tab.status === 'complete') {
+                if (isDone) return;
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                clearTimeout(timer);
+                resolve(tab);
+            }
+        }).catch(() => {});
     });
 }
 
@@ -197,29 +217,37 @@ function waitForTabUrlAndComplete(tabId, urlSubstr, timeoutMs = 15000) {
             reject(new Error(`Timeout waiting for tab to reach target page`));
         }, timeoutMs);
 
+        function checkTab(tab) {
+            if (!tab || isDone) return;
+            // Check if Amazon redirected to login page
+            if (tab.url && (tab.url.includes('/signin') || tab.url.includes('/ap/signin') || tab.url.includes('openid.assoc_handle'))) {
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                clearTimeout(timer);
+                reject(new Error('LOGIN_REQUIRED'));
+                return;
+            }
+
+            if (tab.url && tab.url.includes(urlSubstr) && tab.status === 'complete') {
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                clearTimeout(timer);
+                resolve(tab);
+            }
+        }
+
         function listener(updatedTabId, changeInfo, tab) {
             if (updatedTabId === tabId) {
-                // Check if Amazon redirected to login page
-                if (tab.url && (tab.url.includes('/signin') || tab.url.includes('/ap/signin'))) {
-                    if (isDone) return;
-                    isDone = true;
-                    chrome.tabs.onUpdated.removeListener(listener);
-                    clearTimeout(timer);
-                    reject(new Error('LOGIN_REQUIRED'));
-                    return;
-                }
-
-                if (tab.url && tab.url.includes(urlSubstr) && changeInfo.status === 'complete') {
-                    if (isDone) return;
-                    isDone = true;
-                    chrome.tabs.onUpdated.removeListener(listener);
-                    clearTimeout(timer);
-                    resolve(tab);
-                }
+                checkTab(tab);
             }
         }
 
         chrome.tabs.onUpdated.addListener(listener);
+
+        // Immediate check in case tab already reached target or redirected
+        chrome.tabs.get(tabId).then(tab => {
+            checkTab(tab);
+        }).catch(() => {});
     });
 }
 
@@ -300,27 +328,38 @@ async function startMobileRewardFlow() {
     let rewardsTab = null;
 
     try {
-        // Step 2: Open rewards page
-        rewardsTab = await chrome.tabs.create({ url: REWARDS_LINK, active: false });
-        activeRewardTabId = rewardsTab.id;
+        // Step 2: Open rewards page or reuse existing open rewards tab
+        const existingTabs = await chrome.tabs.query({ url: "*://*.amazon.in/h/rewards*" });
+        if (existingTabs && existingTabs.length > 0) {
+            rewardsTab = existingTabs[0];
+            activeRewardTabId = rewardsTab.id;
+        } else {
+            rewardsTab = await chrome.tabs.create({ url: REWARDS_LINK, active: false });
+            activeRewardTabId = rewardsTab.id;
+            await waitForTabUrlAndComplete(rewardsTab.id, 'amazon.in/h/rewards', 15000);
+        }
 
-        await waitForTabUrlAndComplete(rewardsTab.id, 'amazon.in/h/rewards', 15000);
+        // Step 3: Emulate mobile device (if debugger supported)
+        try {
+            await setAppState({
+                phase: 'preparing',
+                message: 'Preparing rewards...'
+            });
+            await emulateMobileView(rewardsTab.id);
 
-        // Step 3: Emulate mobile device
-        await setAppState({
-            phase: 'preparing',
-            message: 'Preparing rewards...'
-        });
-        await emulateMobileView(rewardsTab.id);
-
-        // Step 4: Refresh page in mobile mode
-        await setAppState({
-            phase: 'loading',
-            message: 'Loading offers...'
-        });
-        const reloadWait = waitForTabComplete(rewardsTab.id, 15000);
-        await chrome.tabs.reload(rewardsTab.id);
-        await reloadWait;
+            // If debugger successfully attached, refresh to fetch mobile layout
+            if (attachedTabs.has(rewardsTab.id)) {
+                await setAppState({
+                    phase: 'loading',
+                    message: 'Loading offers...'
+                });
+                const reloadWait = waitForTabComplete(rewardsTab.id, 15000);
+                await chrome.tabs.reload(rewardsTab.id);
+                await reloadWait;
+            }
+        } catch (emuErr) {
+            console.warn('Mobile emulation failed, continuing with standard layout:', emuErr);
+        }
 
         // Step 5: Start coupon collection
         await setAppState({
