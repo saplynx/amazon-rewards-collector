@@ -1,9 +1,21 @@
 // Content script for Amazon Rewards Coupon Collector
+// Preserves 34f271b working mechanism with manual human-like actions and complete state management
 
 let isCollecting = false;
 let abortRequested = false;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Safe runtime messaging guard to prevent exceptions if extension context unloads
+ */
+function safeSendMessage(payload) {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
+            chrome.runtime.sendMessage(payload).catch(() => {});
+        }
+    } catch (e) {}
+}
 
 /**
  * Generate a random integer delay between min and max (inclusive) for natural human jitter
@@ -13,130 +25,131 @@ function getRandomDelay(min, max) {
 }
 
 /**
- * Query DOM recursively including shadow roots if present
+ * Wait until the page finishes loading completely and reward containers are rendered
+ * before starting any actions.
  */
-function querySelectorAllDeep(selector, root = document) {
-    const results = Array.from(root.querySelectorAll(selector));
-    const all = root.querySelectorAll('*');
-    for (const el of all) {
-        if (el.shadowRoot) {
-            results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+async function waitForPageToLoad() {
+    console.log('Waiting for rewards page to finish loading before starting actions...');
+    safeSendMessage({
+        action: 'collectionProgress',
+        current: 0,
+        total: 0,
+        sessionCollected: 0,
+        message: 'Waiting for rewards page to finish loading...'
+    });
+
+    // 1. Wait for document.readyState === 'complete'
+    if (document.readyState !== 'complete') {
+        await new Promise((resolve) => {
+            const onLoad = () => {
+                window.removeEventListener('load', onLoad);
+                resolve();
+            };
+            window.addEventListener('load', onLoad);
+            setTimeout(resolve, 8000); // safety fallback
+        });
+    }
+
+    // 2. Poll for primary reward elements / containers to be present in the DOM
+    const startWait = Date.now();
+    const MAX_WAIT_MS = 10000;
+    const REWARD_CONTAINER_SELECTORS = [
+        '#rewards-grid',
+        '.rewards-banner',
+        '.coupons-wrap',
+        '.a-carousel',
+        'tux-slider',
+        '.carousel-scroller-card-list-container',
+        '[data-coupon-id]',
+        '[id^="amzn1.rewards.reward"]',
+        '.rh-offer-card',
+        '.rh-rewards-banner',
+        'button, [role="button"]'
+    ].join(', ');
+
+    while (Date.now() - startWait < MAX_WAIT_MS && !abortRequested) {
+        const found = document.querySelector(REWARD_CONTAINER_SELECTORS);
+        if (found) {
+            break;
         }
+        await sleep(250);
     }
-    return results;
+
+    // 3. Wait for initial skeleton screens / loading spinners to resolve
+    await waitForListItemsToSettle(document, 4000);
+
+    // 4. Natural settle delay (hydration / late-script settlement)
+    await sleep(getRandomDelay(1200, 1800));
+    console.log('Page load complete. Starting actions.');
 }
 
 /**
- * Resolve unique coupon ID by searching up the DOM and across Shadow DOM boundaries
+ * Wait for active loading indicators to disappear and list items to settle
+ * before triggering the next scroll.
  */
-function getCouponId(el) {
-    let curr = el;
-    while (curr) {
-        const id = curr.getAttribute?.('data-coupon-id') ||
-                   (curr.id && curr.id.startsWith('amzn1.rewards.reward.') ? curr.id : null);
-        if (id) return id;
-        curr = curr.parentElement || (curr.getRootNode && curr.getRootNode() !== document ? curr.getRootNode().host : null);
-    }
-    return null;
-}
-
-/**
- * Check if an element is a valid, active Collect / Claim button
- */
-function isCollectButton(el) {
-    if (!el) return false;
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
-
-    // Check display/visibility
-    if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) {
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
-    }
-
-    // Exclude invalid container or state classes (e.g. unrevealed scratch cards, claimed cards)
-    if (el.closest('.redeem-btn, .claim-code-btn, .claimed-state, .expired-state, .hidden, .sc-hidden, .sc-display-none, .sc-cover-container')) {
-        return false;
-    }
-
-    // Check if within unclaimed container that is marked hidden
-    const unclaimed = el.closest('.unclaimed-state');
-    if (unclaimed && (unclaimed.classList.contains('hidden') || unclaimed.style.display === 'none')) {
-        return false;
-    }
-
-    // Check if within CTA section where claimed-state is active and not hidden
-    const cta = el.closest('.cta-section, .offer-cta');
-    if (cta) {
-        const claimed = cta.querySelector('.claimed-state');
-        if (claimed && !claimed.classList.contains('hidden') && claimed.style.display !== 'none') {
-            return false;
+async function waitForListItemsToSettle(container = document, maxWaitMs = 1500) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs && !abortRequested) {
+        // Check for active spinners, skeletons, or placeholder cards inside the container
+        const loaders = container.querySelectorAll(
+            '.a-spinner:not(.a-hidden), .loading-spinner, .a-skeleton, .skeleton-card, [data-loading="true"], .shimmer'
+        );
+        let hasVisibleLoader = false;
+        for (const l of loaders) {
+            if (l.offsetParent !== null || l.offsetWidth > 0 || l.offsetHeight > 0) {
+                hasVisibleLoader = true;
+                break;
+            }
         }
+        if (!hasVisibleLoader) {
+            // No visible loaders remaining
+            break;
+        }
+        await sleep(150);
     }
-
-    // Exclude external third-party merchant links (e.g. boAt, Lenskart target="_blank" with dest=)
-    const link = el.tagName.toLowerCase() === 'a' ? el : el.closest('a');
-    if (link && (link.target === '_blank' || (link.href && (link.href.includes('dest=') || link.href.includes('/r?aid=') || !link.href.includes('amazon.in'))))) {
-        return false;
-    }
-
-    const text = (el.innerText || el.textContent || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-    // Must not be already collected / redeemed / shopping cta
-    if (
-        text.includes('collected') ||
-        text.includes('claimed') ||
-        text.includes('already collected') ||
-        text.includes('view offer') ||
-        text.includes('shop now') ||
-        text.includes('buy now') ||
-        text.includes('order now') ||
-        text.includes('unlocked') ||
-        text.includes('available to use') ||
-        text.includes('redeem')
-    ) {
-        return false;
-    }
-
-    // Must match collect / claim phrasing
-    const matchesCollect = (
-        text === 'collect' ||
-        text === 'collect now' ||
-        text === 'collect offer' ||
-        text === 'collect coupon' ||
-        text === 'collect reward' ||
-        text === 'claim' ||
-        text === 'claim now' ||
-        text === 'claim offer' ||
-        /\b(collect|claim)\b/i.test(text)
-    );
-
-    return matchesCollect;
 }
 
 /**
- * Find all uncollected reward/coupon buttons currently present in the DOM (including inside shadow roots)
+ * Find all uncollected reward/coupon buttons (faithful to 34f271b working mechanism)
  */
-function findCollectButtons(root = document) {
-    const candidates = querySelectorAllDeep(
-        'button, [role="button"], input[type="button"], input[type="submit"], a.a-button-text, .a-button, .a-button-inner, .offer-cta, [data-action="collect"], .collect-coupon-btn, [data-coupon-id]',
-        root
+function findCollectButtons() {
+    const candidateElements = document.querySelectorAll(
+        'button, [role="button"], input[type="button"], a.a-button-text, .a-button-inner'
     );
 
     const validButtons = [];
-    for (const el of candidates) {
-        // Exclude image wrappers and non-action containers
-        if (el.classList && (el.classList.contains('reward-ad-image-click-dp') || el.classList.contains('sc-cover-container'))) {
+
+    for (const el of candidateElements) {
+        // Skip invisible or disabled elements
+        if (!el || el.offsetParent === null || el.disabled || el.getAttribute('aria-disabled') === 'true') {
             continue;
         }
 
-        let target = el;
-        if (el.tagName.toLowerCase() !== 'button' && el.tagName.toLowerCase() !== 'input') {
-            const btn = el.closest('button, [role="button"], input, a') || el.querySelector('button, [role="button"], input');
-            if (btn) target = btn;
+        // Avoid unrevealed scratch cards or external partner referral links
+        if (el.closest('.sc-hidden, .sc-cover-container, .claimed-state, .expired-state')) {
+            continue;
+        }
+        const link = el.tagName.toLowerCase() === 'a' ? el : el.closest('a');
+        if (link && (link.target === '_blank' || (link.href && (link.href.includes('dest=') || link.href.includes('/r?aid='))))) {
+            continue;
         }
 
-        if (isCollectButton(target) && !validButtons.includes(target)) {
-            validButtons.push(target);
+        const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+        // Check if button text matches collect actions (exact 34f271b matching)
+        const isCollect = (
+            rawText === 'collect now' ||
+            rawText === 'collect offer' ||
+            rawText === 'collect' ||
+            (rawText.startsWith('collect') && !rawText.includes('collected') && !rawText.includes('collection'))
+        );
+
+        if (isCollect) {
+            // Find clickable target: button itself or closest button
+            const clickable = el.tagName.toLowerCase() === 'button' ? el : (el.closest('button') || el);
+            if (!validButtons.includes(clickable)) {
+                validButtons.push(clickable);
+            }
         }
     }
 
@@ -144,223 +157,262 @@ function findCollectButtons(root = document) {
 }
 
 /**
- * Check if a button has already been clicked, collected, or claimed
+ * Check if button has already been collected or clicked in this session
  */
-function isCollectedOrClicked(button, collectedCouponIds) {
+function isAlreadyCollected(button) {
     if (!button) return true;
     if (button.dataset.arcCollected === 'true') return true;
 
-    const parentBtn = button.closest('.a-button');
-    if (parentBtn && parentBtn.dataset.arcCollected === 'true') return true;
+    const currentText = (button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (currentText.includes('collected') || currentText.includes('claimed') || currentText.includes('redeem')) {
+        return true;
+    }
 
-    const couponId = getCouponId(button);
-    if (couponId && collectedCouponIds.has(couponId)) return true;
-
-    return !isCollectButton(button);
+    return false;
 }
 
 /**
- * Scroll horizontally and vertically to center the target coupon in view
+ * Expand fragment "Load more" or pagination buttons if present and wait for items to mount
  */
-async function scrollToCoupon(button) {
-    if (!button) return;
-
-    // Center button smoothly in viewport
-    try {
-        button.scrollIntoView({
-            behavior: 'smooth',
-            block: 'center',
-            inline: 'center'
-        });
-    } catch (e) {
-        try {
-            button.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } catch (err) {}
-    }
-
-    // Align any horizontal scrollable container (e.g. mobile carousels)
-    let parent = button.parentElement;
-    while (parent && parent !== document.body) {
-        if (parent.scrollWidth > parent.clientWidth + 10) {
-            const btnRect = button.getBoundingClientRect();
-            const parentRect = parent.getBoundingClientRect();
-            if (btnRect.left < parentRect.left + 15 || btnRect.right > parentRect.right - 15) {
-                const targetScrollLeft = parent.scrollLeft + (btnRect.left - parentRect.left) - (parentRect.width / 2) + (btnRect.width / 2);
-                parent.scrollTo({
-                    left: Math.max(0, targetScrollLeft),
-                    behavior: 'smooth'
-                });
-            }
-            break;
-        }
-        parent = parent.parentElement || (parent.getRootNode && parent.getRootNode() !== document ? parent.getRootNode().host : null);
-    }
-
-    await sleep(getRandomDelay(150, 250));
-}
-
-/**
- * Simulate human mouse & touch click sequence on button
- */
-async function simulateHumanClick(button, collectedCouponIds) {
-    if (!button) return;
-
-    // Mark collected immediately
-    button.dataset.arcCollected = 'true';
-    const parent = button.parentElement || (button.getRootNode && button.getRootNode() !== document ? button.getRootNode().host : null);
-    if (parent && parent.dataset) parent.dataset.arcCollected = 'true';
-
-    const couponId = getCouponId(button);
-    if (couponId) {
-        collectedCouponIds.add(couponId);
-    }
-
-    const rect = button.getBoundingClientRect();
-    const clientX = Math.round(rect.left + (rect.width > 0 ? rect.width / 2 : 10));
-    const clientY = Math.round(rect.top + (rect.height > 0 ? rect.height / 2 : 10));
-    const screenX = window.screenX + clientX;
-    const screenY = window.screenY + clientY;
-
-    const baseEventInit = {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX,
-        clientY,
-        screenX,
-        screenY
-    };
-
-    // Pointer events (Mobile / Touch listeners)
-    try {
-        button.dispatchEvent(new PointerEvent('pointerover', { ...baseEventInit, pointerType: 'touch' }));
-        button.dispatchEvent(new PointerEvent('pointerenter', { ...baseEventInit, pointerType: 'touch' }));
-        button.dispatchEvent(new PointerEvent('pointerdown', { ...baseEventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
-    } catch (e) {}
-
-    // Mouse events (Desktop listeners)
-    try {
-        button.dispatchEvent(new MouseEvent('mouseover', { ...baseEventInit, buttons: 0 }));
-        button.dispatchEvent(new MouseEvent('mouseenter', { ...baseEventInit, buttons: 0 }));
-        button.dispatchEvent(new MouseEvent('mousedown', { ...baseEventInit, button: 0, buttons: 1 }));
-    } catch (e) {}
-
-    await sleep(getRandomDelay(40, 80));
-
-    try {
-        button.dispatchEvent(new PointerEvent('pointerup', { ...baseEventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
-    } catch (e) {}
-
-    try {
-        button.dispatchEvent(new MouseEvent('mouseup', { ...baseEventInit, button: 0, buttons: 0 }));
-    } catch (e) {}
-
-    // Native DOM click
-    try {
-        button.click();
-    } catch (e) {
-        try {
-            button.dispatchEvent(new MouseEvent('click', { ...baseEventInit, button: 0, buttons: 0 }));
-        } catch (err) {}
-    }
-}
-
-/**
- * Expand fragment "Load more" buttons if present
- */
-function expandLoadMoreButtons() {
-    const moreButtons = querySelectorAllDeep(
+async function expandLoadMoreButtons() {
+    const moreButtons = document.querySelectorAll(
         '.fragment-load-more-button, .fragment-load-more-button input, .fragment-load-more-button .a-button-text, button[data-action="load-more"], a[data-action="load-more"]'
     );
     for (const btn of moreButtons) {
         if (btn && btn.dataset.arcExpanded !== 'true') {
             btn.dataset.arcExpanded = 'true';
-            try { btn.click(); } catch (e) {}
+            try {
+                btn.click();
+                // Wait for the newly fetched items to mount
+                await sleep(getRandomDelay(500, 800));
+                await waitForListItemsToSettle(document, 1500);
+            } catch (e) {}
         }
     }
 }
 
 /**
- * Sweep horizontal carousels visible in the viewport to reveal and collect offscreen cards
+ * Phase 1: Scroll all the way to the bottom with natural manual gestures,
+ * ensuring newly revealed list items/shelves load before the next scroll.
  */
-async function sweepCarouselsInView(collectedCouponIds, onCollect, isTimeUp) {
-    const carousels = querySelectorAllDeep(
-        'tux-slider, .carousel-scroller-card-list-container, .coupons-wrap, [role="list"].remove-scrollbars, .a-carousel, .a-carousel-viewport, .a-carousel-container, .carousel-mobile'
+async function manualScrollToBottom(isTimeUp) {
+    console.log('Phase 1: Manual scrolling to bottom to trigger lazy loading...');
+    let lastScrollY = -1;
+    let stuckCount = 0;
+    let lastProgressReport = Date.now();
+
+    while (!abortRequested && (!isTimeUp || !isTimeUp())) {
+        const docHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
+        const currentScroll = window.scrollY + window.innerHeight;
+
+        // Keep watchdog timer active with live progress updates
+        if (Date.now() - lastProgressReport > 3000) {
+            safeSendMessage({
+                action: 'collectionProgress',
+                current: 0,
+                total: 0,
+                sessionCollected: 0,
+                message: 'Loading rewards (scrolling to bottom)...'
+            });
+            lastProgressReport = Date.now();
+        }
+
+        // Expand any load-more fragment buttons encountered along the way
+        await expandLoadMoreButtons();
+
+        // Human-like scroll step with randomized distance (280px - 440px)
+        const scrollStep = getRandomDelay(280, 440);
+        window.scrollBy({ top: scrollStep, behavior: 'smooth' });
+
+        // Wait for list items and dynamic shelves to load before the next scroll
+        await waitForListItemsToSettle(document, 1500);
+
+        // Natural human pause before the next scroll step (400ms - 700ms)
+        await sleep(getRandomDelay(400, 700));
+
+        // Detect reaching bottom or stuck
+        if (window.scrollY === lastScrollY) {
+            stuckCount++;
+            if (currentScroll >= docHeight - 60) {
+                // Wait to see if infinite scroll loads more content
+                await sleep(getRandomDelay(800, 1200));
+                await waitForListItemsToSettle(document, 2000);
+                const newDocHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
+                if (newDocHeight > docHeight + 60) {
+                    stuckCount = 0;
+                    continue;
+                } else if (stuckCount >= 2) {
+                    break; // Confirmed bottom
+                }
+            } else if (stuckCount >= 3) {
+                break;
+            }
+        } else {
+            stuckCount = 0;
+            lastScrollY = window.scrollY;
+        }
+    }
+}
+
+/**
+ * Phase 2: Scroll each horizontal list / carousel till the end,
+ * ensuring newly revealed items/cards load before the next scroll.
+ */
+async function manualScrollEachList(isTimeUp) {
+    console.log('Phase 2: Scrolling each horizontal list / carousel till the end...');
+    const carousels = document.querySelectorAll(
+        '.coupons-wrap, .carousel-scroller-card-list-container, [role="list"].remove-scrollbars, .a-carousel, tux-slider, .a-carousel-viewport'
     );
 
-    for (const c of carousels) {
+    let lastProgressReport = Date.now();
+
+    for (let i = 0; i < carousels.length; i++) {
         if (abortRequested || (isTimeUp && isTimeUp())) break;
 
-        const rect = c.getBoundingClientRect();
-        // Skip if outside vertical view
-        if (rect.bottom < -200 || rect.top > window.innerHeight + 200) {
-            continue;
+        const c = carousels[i];
+
+        // Keep watchdog timer active
+        if (Date.now() - lastProgressReport > 3000) {
+            safeSendMessage({
+                action: 'collectionProgress',
+                current: 0,
+                total: 0,
+                sessionCollected: 0,
+                message: `Expanding reward carousels (${i + 1}/${carousels.length})...`
+            });
+            lastProgressReport = Date.now();
         }
 
-        // Advance standard Amazon AUI desktop carousel if next button exists
-        const carouselContainer = c.closest('.a-carousel-container') || c;
-        const nextBtn = carouselContainer.querySelector?.('.a-carousel-goto-nextpage, .a-carousel-right');
+        // Scroll carousel into view naturally
+        try {
+            c.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await sleep(getRandomDelay(180, 300));
+        } catch (e) {}
 
-        if (c.scrollWidth <= c.clientWidth + 15 && !nextBtn) {
-            continue;
-        }
+        // Ensure visible carousel items have settled
+        await waitForListItemsToSettle(c, 1200);
 
-        const maxScrollLeft = Math.max(0, c.scrollWidth - c.clientWidth);
-        const step = Math.max(250, Math.floor((c.clientWidth || 350) * 0.75));
+        // Scroll native horizontal overflow rail incrementally till the end (skip desktop AUI viewports which use transforms)
+        const computedOverflow = window.getComputedStyle(c).overflowX;
+        const isNativeScrollable = (computedOverflow === 'auto' || computedOverflow === 'scroll') && !c.classList.contains('a-carousel-viewport');
 
-        // Scroll native overflow carousels
-        if (maxScrollLeft > 0) {
-            for (let left = 0; left <= maxScrollLeft + step; left += step) {
-                if (abortRequested || (isTimeUp && isTimeUp())) break;
+        if (isNativeScrollable && c.scrollWidth > c.clientWidth + 15) {
+            const maxScrollLeft = c.scrollWidth - c.clientWidth;
+            let currentLeft = c.scrollLeft;
 
-                c.scrollTo({ left: Math.min(left, maxScrollLeft), behavior: 'smooth' });
-                await sleep(getRandomDelay(120, 200));
+            while (currentLeft < maxScrollLeft && !abortRequested && (!isTimeUp || !isTimeUp())) {
+                // Natural swipe distance (~65% to 85% of visible client width)
+                const swipeStep = Math.min(
+                    getRandomDelay(Math.floor(c.clientWidth * 0.65), Math.floor(c.clientWidth * 0.85)),
+                    maxScrollLeft - currentLeft
+                );
+                currentLeft += swipeStep;
+                c.scrollTo({ left: currentLeft, behavior: 'smooth' });
 
-                const carouselButtons = findCollectButtons(c);
-                const uncollected = carouselButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
+                // Wait for newly revealed list items/cards to load before next horizontal scroll
+                await waitForListItemsToSettle(c, 1500);
 
-                for (const btn of uncollected) {
-                    if (abortRequested || (isTimeUp && isTimeUp())) break;
-                    if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
-
-                    await scrollToCoupon(btn);
-                    await simulateHumanClick(btn, collectedCouponIds);
-                    onCollect();
-                    await sleep(getRandomDelay(250, 450));
-                }
-
-                if (left >= maxScrollLeft) break;
+                // Natural human pause before next swipe
+                await sleep(getRandomDelay(450, 700));
             }
         }
 
-        // Advance AUI paged carousels if next button is active
+        // If desktop AUI carousel with next button, advance page by page
+        const container = c.closest('.a-carousel-container') || c;
+        const nextBtn = container.querySelector('.a-carousel-goto-nextpage, .a-carousel-right');
         if (nextBtn && !nextBtn.classList.contains('a-disabled')) {
-            for (let p = 0; p < 4; p++) {
-                if (abortRequested || (isTimeUp && isTimeUp())) break;
-                if (nextBtn.classList.contains('a-disabled')) break;
+            for (let page = 0; page < 6; page++) {
+                if (abortRequested || (isTimeUp && isTimeUp()) || nextBtn.classList.contains('a-disabled')) break;
 
-                const carouselButtons = findCollectButtons(carouselContainer);
-                const uncollected = carouselButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
+                try {
+                    nextBtn.click();
+                } catch (e) {}
 
-                for (const btn of uncollected) {
-                    if (abortRequested || (isTimeUp && isTimeUp())) break;
-                    if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
-
-                    await scrollToCoupon(btn);
-                    await simulateHumanClick(btn, collectedCouponIds);
-                    onCollect();
-                    await sleep(getRandomDelay(250, 450));
+                // Wait for AUI carousel transition animation to finish
+                const transitionStart = Date.now();
+                while (Date.now() - transitionStart < 1000 && !abortRequested) {
+                    if (!container.classList.contains('a-carousel-transitioning') && !c.classList.contains('a-carousel-transitioning')) {
+                        break;
+                    }
+                    await sleep(100);
                 }
 
-                try { nextBtn.click(); } catch (e) {}
-                await sleep(getRandomDelay(300, 450));
+                // Wait for the new page's list items to render and settle before next scroll/page
+                await waitForListItemsToSettle(container, 1500);
+
+                // Human pause between pages before next click
+                await sleep(getRandomDelay(480, 750));
             }
         }
     }
 }
 
 /**
- * Main collection controller: progressive downward sweep with horizontal carousel processing
+ * Simulate a realistic manual human tap / click on a button
+ */
+async function manualClick(button) {
+    if (!button) return;
+
+    // 1. Scroll into view smoothly (centered vertically and horizontally)
+    try {
+        button.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    } catch (e) {
+        button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // Natural human gaze / settle hesitation (220ms - 380ms)
+    await sleep(getRandomDelay(220, 380));
+
+    // Calculate natural coordinates with jitter (within 30% to 70% of button bounds)
+    const rect = button.getBoundingClientRect();
+    const jitterX = rect.width * (0.3 + Math.random() * 0.4);
+    const jitterY = rect.height * (0.3 + Math.random() * 0.4);
+    const clientX = Math.round(rect.left + Math.max(2, Math.min(rect.width - 2, jitterX)));
+    const clientY = Math.round(rect.top + Math.max(2, Math.min(rect.height - 2, jitterY)));
+
+    const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX,
+        clientY,
+        screenX: window.screenX + clientX,
+        screenY: window.screenY + clientY
+    };
+
+    // 2. Hover / enter simulation
+    button.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerType: 'touch' }));
+    button.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerType: 'touch' }));
+    button.dispatchEvent(new MouseEvent('mouseover', eventInit));
+    button.dispatchEvent(new MouseEvent('mouseenter', eventInit));
+    await sleep(getRandomDelay(40, 80));
+
+    // 3. Touch / mouse down
+    button.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
+    button.dispatchEvent(new MouseEvent('mousedown', { ...eventInit, button: 0, buttons: 1 }));
+
+    // Hold duration (50ms - 95ms)
+    await sleep(getRandomDelay(50, 95));
+
+    // 4. Touch / mouse up
+    button.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerType: 'touch', isPrimary: true, button: 0 }));
+    button.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, button: 0, buttons: 0 }));
+
+    // 5. Native click execution
+    try {
+        button.click();
+    } catch (e) {
+        button.dispatchEvent(new MouseEvent('click', { ...eventInit, button: 0, buttons: 0 }));
+    }
+}
+
+/**
+ * Main collection controller:
+ * 1. Wait for page to finish loading completely before starting actions
+ * 2. Manually scroll to bottom, ensuring list items load before each scroll
+ * 3. Manually scroll each horizontal list till the end, waiting for items before each scroll
+ * 4. Smoothly scroll back to top and settle
+ * 5. Manually click each collect button with realistic jitter, pauses, and live progress state
  */
 async function collectAllCoupons() {
     if (isCollecting) {
@@ -369,107 +421,140 @@ async function collectAllCoupons() {
 
     isCollecting = true;
     abortRequested = false;
-    console.log('Starting Amazon Rewards coupon collection with progressive sweep...');
+    console.log('Starting coupon collection with manual human-like actions...');
 
+    let collectedCount = 0;
     const startTime = Date.now();
-    const MAX_DURATION_MS = 170000; // Under 180s background ceiling
+    const MAX_DURATION_MS = 175000;
     const isTimeUp = () => (Date.now() - startTime) >= MAX_DURATION_MS;
 
-    const collectedCouponIds = new Set();
-    let collectedCount = 0;
+    // Step 0: Ensure page has completely finished loading before starting actions
+    await waitForPageToLoad();
 
-    const notifyProgress = (msg) => {
-        chrome.runtime.sendMessage({
+    if (abortRequested || isTimeUp()) {
+        finishCollection(collectedCount, startTime);
+        return;
+    }
+
+    // Phase 1: Scroll all the way to bottom to load all 'load on scroll' / paginated data
+    safeSendMessage({
+        action: 'collectionProgress',
+        current: 0,
+        total: 0,
+        sessionCollected: 0,
+        message: 'Loading rewards (scrolling to bottom)...'
+    });
+
+    await manualScrollToBottom(isTimeUp);
+
+    if (abortRequested || isTimeUp()) {
+        finishCollection(collectedCount, startTime);
+        return;
+    }
+
+    // Phase 2: Scroll each list/carousel till the end, waiting for items to load before each scroll
+    safeSendMessage({
+        action: 'collectionProgress',
+        current: 0,
+        total: 0,
+        sessionCollected: 0,
+        message: 'Expanding reward carousels...'
+    });
+
+    await manualScrollEachList(isTimeUp);
+
+    if (abortRequested || isTimeUp()) {
+        finishCollection(collectedCount, startTime);
+        return;
+    }
+
+    // Phase 3: Smoothly scroll back to top and wait for settle
+    safeSendMessage({
+        action: 'collectionProgress',
+        current: 0,
+        total: 0,
+        sessionCollected: 0,
+        message: 'Starting coupon collection...'
+    });
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    await sleep(getRandomDelay(500, 800));
+    await waitForListItemsToSettle(document, 1500);
+
+    // Phase 4: Find and manually click all available collect buttons
+    const allButtons = findCollectButtons();
+    console.log(`Found ${allButtons.length} collect buttons after full discovery.`);
+
+    safeSendMessage({
+        action: 'collectionProgress',
+        current: 0,
+        total: allButtons.length,
+        sessionCollected: 0,
+        message: `Collecting coupons (0 of ${allButtons.length})...`
+    });
+
+    for (let i = 0; i < allButtons.length; i++) {
+        if (abortRequested || isTimeUp()) break;
+
+        const button = allButtons[i];
+        if (isAlreadyCollected(button)) {
+            continue;
+        }
+
+        console.log(`Manually clicking coupon ${collectedCount + 1}/${allButtons.length}: ${button.innerText?.trim() || button.id}`);
+
+        // Perform realistic manual tap/click simulation
+        await manualClick(button);
+        button.dataset.arcCollected = 'true';
+        collectedCount++;
+
+        // Live progress reporting
+        safeSendMessage({
             action: 'collectionProgress',
             current: collectedCount,
-            total: Math.max(collectedCount, collectedCount + 5),
+            total: allButtons.length,
             sessionCollected: collectedCount,
-            message: msg || `Collected ${collectedCount} reward${collectedCount === 1 ? '' : 's'}...`
-        }).catch(() => {});
-    };
+            message: `Collecting coupon ${collectedCount} of ${allButtons.length}...`
+        });
 
-    notifyProgress('Scanning rewards page...');
-
-    // 1. Start from the top
-    window.scrollTo({ top: 0, behavior: 'instant' });
-    await sleep(400);
-
-    // 2. Progressive downward sweep
-    const SCROLL_STEP = 400;
-    let noNewContentChecks = 0;
-
-    while (!abortRequested && !isTimeUp()) {
-        // Expand any load-more fragment buttons
-        expandLoadMoreButtons();
-
-        // Check horizontal carousels in view
-        await sweepCarouselsInView(collectedCouponIds, () => {
-            collectedCount++;
-            notifyProgress();
-        }, isTimeUp);
-
-        // Find and collect all buttons in view
-        const currentButtons = findCollectButtons();
-        const uncollected = currentButtons.filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
-
-        for (const btn of uncollected) {
-            if (abortRequested || isTimeUp()) break;
-            if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
-
-            await scrollToCoupon(btn);
-            if (abortRequested || isTimeUp()) break;
-
-            await simulateHumanClick(btn, collectedCouponIds);
-            collectedCount++;
-            notifyProgress();
-
-            await sleep(getRandomDelay(280, 500));
-        }
-
-        // Check if we've reached the bottom of the document
-        const scrollBottom = window.scrollY + window.innerHeight;
-        const docHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
-
-        if (scrollBottom >= docHeight - 30) {
-            // Wait to see if infinite scroll loads more content
-            await sleep(700);
-            const newDocHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
-            if (newDocHeight > docHeight + 80) {
-                window.scrollBy({ top: SCROLL_STEP, behavior: 'smooth' });
-                await sleep(350);
-                noNewContentChecks = 0;
-                continue;
-            } else {
-                noNewContentChecks++;
-                if (noNewContentChecks >= 2) {
-                    break; // Truly at bottom
-                }
-            }
-        }
-
-        // Scroll down to reveal next section
-        window.scrollBy({ top: SCROLL_STEP, behavior: 'smooth' });
-        await sleep(getRandomDelay(220, 380));
+        // Realistic human interval between clicks (500ms - 850ms)
+        await sleep(getRandomDelay(500, 850));
     }
 
-    // 3. One quick upward verification pass to collect any late-rendered items
+    // Verification check: sweep any late-rendered items
     if (!abortRequested && !isTimeUp()) {
-        const remainingButtons = findCollectButtons().filter(btn => !isCollectedOrClicked(btn, collectedCouponIds));
-        if (remainingButtons.length > 0) {
-            console.log(`Verification pass: Collecting ${remainingButtons.length} additional coupons...`);
-            for (const btn of remainingButtons) {
+        const remaining = findCollectButtons().filter(btn => !isAlreadyCollected(btn));
+        if (remaining.length > 0) {
+            console.log(`Verification: Found ${remaining.length} late-rendered coupons...`);
+            for (let i = 0; i < remaining.length; i++) {
                 if (abortRequested || isTimeUp()) break;
-                if (isCollectedOrClicked(btn, collectedCouponIds)) continue;
+                const button = remaining[i];
+                if (isAlreadyCollected(button)) continue;
 
-                await scrollToCoupon(btn);
-                await simulateHumanClick(btn, collectedCouponIds);
+                await manualClick(button);
+                button.dataset.arcCollected = 'true';
                 collectedCount++;
-                notifyProgress();
-                await sleep(getRandomDelay(280, 480));
+
+                safeSendMessage({
+                    action: 'collectionProgress',
+                    current: collectedCount,
+                    total: collectedCount,
+                    sessionCollected: collectedCount,
+                    message: `Collecting coupon ${collectedCount}...`
+                });
+
+                await sleep(getRandomDelay(500, 800));
             }
         }
     }
 
+    finishCollection(collectedCount, startTime);
+}
+
+/**
+ * Conclude collection and send final state message
+ */
+function finishCollection(collectedCount, startTime) {
     isCollecting = false;
     const finishedMessage = abortRequested
         ? 'Collection stopped.'
@@ -477,14 +562,14 @@ async function collectAllCoupons() {
 
     console.log(`Collection complete. Total collected: ${collectedCount} in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
 
-    chrome.runtime.sendMessage({
+    safeSendMessage({
         action: 'collectionFinished',
         count: collectedCount,
         message: finishedMessage
-    }).catch(() => {});
+    });
 }
 
-// Message listener
+// Message listeners for collection and stop actions
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'collectCoupons') {
         collectAllCoupons();
