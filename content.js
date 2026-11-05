@@ -25,6 +25,43 @@ function getRandomDelay(min, max) {
 }
 
 /**
+ * Helper to get current vertical scroll position reliably across all modes
+ */
+function getScrollTop() {
+    return window.scrollY || window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+}
+
+/**
+ * Helper to smoothly scroll by vertical distance across window and documentElement
+ */
+function smoothScrollBy(distance) {
+    try {
+        window.scrollBy({ top: distance, behavior: 'smooth' });
+    } catch (e) {}
+    const scroller = document.scrollingElement || document.documentElement || document.body;
+    if (scroller && scroller !== document.body) {
+        try {
+            scroller.scrollBy({ top: distance, behavior: 'smooth' });
+        } catch (e) {}
+    }
+}
+
+/**
+ * Helper to smoothly scroll to top
+ */
+function smoothScrollToTop() {
+    try {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {}
+    const scroller = document.scrollingElement || document.documentElement || document.body;
+    if (scroller) {
+        try {
+            scroller.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch (e) {}
+    }
+}
+
+/**
  * Wait until the page finishes loading completely and reward containers are rendered
  * before starting any actions.
  */
@@ -183,7 +220,7 @@ async function expandLoadMoreButtons() {
             btn.dataset.arcExpanded = 'true';
             try {
                 btn.click();
-                // Wait for the newly fetched items to mount
+                // Wait for newly fetched items to mount
                 await sleep(getRandomDelay(500, 800));
                 await waitForListItemsToSettle(document, 1500);
             } catch (e) {}
@@ -202,8 +239,12 @@ async function manualScrollToBottom(isTimeUp) {
     let lastProgressReport = Date.now();
 
     while (!abortRequested && (!isTimeUp || !isTimeUp())) {
-        const docHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
-        const currentScroll = window.scrollY + window.innerHeight;
+        const docHeight = Math.max(
+            document.body.scrollHeight || 0,
+            document.documentElement.scrollHeight || 0,
+            (document.scrollingElement ? document.scrollingElement.scrollHeight : 0)
+        );
+        const currentScroll = getScrollTop() + window.innerHeight;
 
         // Keep watchdog timer active with live progress updates
         if (Date.now() - lastProgressReport > 3000) {
@@ -222,7 +263,7 @@ async function manualScrollToBottom(isTimeUp) {
 
         // Human-like scroll step with randomized distance (280px - 440px)
         const scrollStep = getRandomDelay(280, 440);
-        window.scrollBy({ top: scrollStep, behavior: 'smooth' });
+        smoothScrollBy(scrollStep);
 
         // Wait for list items and dynamic shelves to load before the next scroll
         await waitForListItemsToSettle(document, 1500);
@@ -231,25 +272,30 @@ async function manualScrollToBottom(isTimeUp) {
         await sleep(getRandomDelay(400, 700));
 
         // Detect reaching bottom or stuck
-        if (window.scrollY === lastScrollY) {
+        const currentY = getScrollTop();
+        if (Math.abs(currentY - lastScrollY) < 10) {
             stuckCount++;
-            if (currentScroll >= docHeight - 60) {
+            if (currentScroll >= docHeight - 80) {
                 // Wait to see if infinite scroll loads more content
                 await sleep(getRandomDelay(800, 1200));
                 await waitForListItemsToSettle(document, 2000);
-                const newDocHeight = Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0);
+                const newDocHeight = Math.max(
+                    document.body.scrollHeight || 0,
+                    document.documentElement.scrollHeight || 0,
+                    (document.scrollingElement ? document.scrollingElement.scrollHeight : 0)
+                );
                 if (newDocHeight > docHeight + 60) {
                     stuckCount = 0;
                     continue;
                 } else if (stuckCount >= 2) {
                     break; // Confirmed bottom
                 }
-            } else if (stuckCount >= 3) {
+            } else if (stuckCount >= 4) {
                 break;
             }
         } else {
             stuckCount = 0;
-            lastScrollY = window.scrollY;
+            lastScrollY = currentY;
         }
     }
 }
@@ -261,7 +307,7 @@ async function manualScrollToBottom(isTimeUp) {
 async function manualScrollEachList(isTimeUp) {
     console.log('Phase 2: Scrolling each horizontal list / carousel till the end...');
     const carousels = document.querySelectorAll(
-        '.coupons-wrap, .carousel-scroller-card-list-container, [role="list"].remove-scrollbars, .a-carousel, tux-slider, .a-carousel-viewport'
+        '.coupons-wrap, .carousel-scroller-card-list-container, [role="list"].remove-scrollbars, .a-carousel, tux-slider, .a-carousel-viewport, .a-carousel-container'
     );
 
     let lastProgressReport = Date.now();
@@ -294,7 +340,7 @@ async function manualScrollEachList(isTimeUp) {
 
         // Scroll native horizontal overflow rail incrementally till the end (skip desktop AUI viewports which use transforms)
         const computedOverflow = window.getComputedStyle(c).overflowX;
-        const isNativeScrollable = (computedOverflow === 'auto' || computedOverflow === 'scroll') && !c.classList.contains('a-carousel-viewport');
+        const isNativeScrollable = (computedOverflow === 'auto' || computedOverflow === 'scroll' || c.scrollWidth > c.clientWidth + 20) && !c.classList.contains('a-carousel-viewport');
 
         if (isNativeScrollable && c.scrollWidth > c.clientWidth + 15) {
             const maxScrollLeft = c.scrollWidth - c.clientWidth;
@@ -307,7 +353,11 @@ async function manualScrollEachList(isTimeUp) {
                     maxScrollLeft - currentLeft
                 );
                 currentLeft += swipeStep;
-                c.scrollTo({ left: currentLeft, behavior: 'smooth' });
+                try {
+                    c.scrollTo({ left: currentLeft, behavior: 'smooth' });
+                } catch (e) {
+                    c.scrollLeft = currentLeft;
+                }
 
                 // Wait for newly revealed list items/cards to load before next horizontal scroll
                 await waitForListItemsToSettle(c, 1500);
@@ -319,10 +369,10 @@ async function manualScrollEachList(isTimeUp) {
 
         // If desktop AUI carousel with next button, advance page by page
         const container = c.closest('.a-carousel-container') || c;
-        const nextBtn = container.querySelector('.a-carousel-goto-nextpage, .a-carousel-right');
-        if (nextBtn && !nextBtn.classList.contains('a-disabled')) {
+        const nextBtn = container.querySelector('.a-carousel-goto-nextpage, .a-carousel-right, [data-action="a-carousel-next"]');
+        if (nextBtn && !nextBtn.classList.contains('a-disabled') && nextBtn.getAttribute('aria-disabled') !== 'true') {
             for (let page = 0; page < 6; page++) {
-                if (abortRequested || (isTimeUp && isTimeUp()) || nextBtn.classList.contains('a-disabled')) break;
+                if (abortRequested || (isTimeUp && isTimeUp()) || nextBtn.classList.contains('a-disabled') || nextBtn.getAttribute('aria-disabled') === 'true') break;
 
                 try {
                     nextBtn.click();
@@ -337,7 +387,7 @@ async function manualScrollEachList(isTimeUp) {
                     await sleep(100);
                 }
 
-                // Wait for the new page's list items to render and settle before next scroll/page
+                // Wait for new page's list items to render and settle before next scroll/page
                 await waitForListItemsToSettle(container, 1500);
 
                 // Human pause between pages before next click
@@ -477,7 +527,7 @@ async function collectAllCoupons() {
         message: 'Starting coupon collection...'
     });
 
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    smoothScrollToTop();
     await sleep(getRandomDelay(500, 800));
     await waitForListItemsToSettle(document, 1500);
 

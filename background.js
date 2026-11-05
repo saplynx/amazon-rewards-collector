@@ -14,16 +14,16 @@ let maxDurationTimer = null;
 let latestSessionCount = 0;
 
 /**
- * Sliding watchdog timer: resets whenever progress is made, triggering only on 35s of inactivity
+ * Sliding watchdog timer: resets whenever progress is made, triggering only on 45s of inactivity
  */
 function resetWatchdogTimer(tabId) {
     if (currentSafetyTimer) {
         clearTimeout(currentSafetyTimer);
     }
     currentSafetyTimer = setTimeout(async () => {
-        console.warn('Watchdog timeout: no progress received for 35s. Concluding collection.');
+        console.warn('Watchdog timeout: no progress received for 45s. Concluding collection.');
         await handleCollectionFinished(latestSessionCount, tabId || activeRewardTabId);
-    }, 35000);
+    }, 45000);
 }
 
 /**
@@ -86,20 +86,22 @@ async function setAppState(updates) {
 })();
 
 /**
- * Ensure the summary page is open and focused immediately
+ * Ensure the summary page is open (by default in background so user watches Amazon tab)
  */
-async function ensureSummaryTab() {
+async function ensureSummaryTab(focus = false) {
     const summaryUrl = chrome.runtime.getURL('summary.html');
     try {
         const tabs = await chrome.tabs.query({ url: summaryUrl });
         if (tabs && tabs.length > 0) {
-            await chrome.tabs.update(tabs[0].id, { active: true });
-            if (tabs[0].windowId) {
-                await chrome.windows.update(tabs[0].windowId, { focused: true });
+            if (focus) {
+                await chrome.tabs.update(tabs[0].id, { active: true });
+                if (tabs[0].windowId) {
+                    await chrome.windows.update(tabs[0].windowId, { focused: true });
+                }
             }
             return tabs[0];
         }
-        return await chrome.tabs.create({ url: summaryUrl, active: true });
+        return await chrome.tabs.create({ url: summaryUrl, active: focus });
     } catch (err) {
         console.error('Error opening summary tab:', err);
         return null;
@@ -167,38 +169,84 @@ async function emulateMobileView(tabId) {
 }
 
 /**
+ * Robust reload that waits for status to transition to loading and then complete
+ */
+function reloadTabAndWait(tabId, timeoutMs = 20000) {
+    return new Promise((resolve) => {
+        let hasStartedLoading = false;
+        let isDone = false;
+
+        const timer = setTimeout(() => {
+            if (!isDone) {
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+            }
+        }, timeoutMs);
+
+        function listener(updatedTabId, changeInfo) {
+            if (updatedTabId === tabId) {
+                if (changeInfo.status === 'loading') {
+                    hasStartedLoading = true;
+                }
+                if (hasStartedLoading && changeInfo.status === 'complete') {
+                    if (!isDone) {
+                        isDone = true;
+                        chrome.tabs.onUpdated.removeListener(listener);
+                        clearTimeout(timer);
+                        resolve();
+                    }
+                }
+            }
+        }
+
+        chrome.tabs.onUpdated.addListener(listener);
+        chrome.tabs.reload(tabId).catch(() => {
+            if (!isDone) {
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                clearTimeout(timer);
+                resolve();
+            }
+        });
+    });
+}
+
+/**
  * Wait for a tab to finish loading
  */
 function waitForTabComplete(tabId, timeoutMs = 15000) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         let isDone = false;
         const timer = setTimeout(() => {
-            if (isDone) return;
-            isDone = true;
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error(`Timeout waiting for tab to load`));
+            if (!isDone) {
+                isDone = true;
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+            }
         }, timeoutMs);
 
         function listener(updatedTabId, changeInfo, tab) {
             if (updatedTabId === tabId && changeInfo.status === 'complete') {
-                if (isDone) return;
-                isDone = true;
-                chrome.tabs.onUpdated.removeListener(listener);
-                clearTimeout(timer);
-                resolve(tab);
+                if (!isDone) {
+                    isDone = true;
+                    chrome.tabs.onUpdated.removeListener(listener);
+                    clearTimeout(timer);
+                    resolve(tab);
+                }
             }
         }
 
         chrome.tabs.onUpdated.addListener(listener);
 
-        // Immediate check in case tab is already complete
         chrome.tabs.get(tabId).then(tab => {
             if (tab && tab.status === 'complete') {
-                if (isDone) return;
-                isDone = true;
-                chrome.tabs.onUpdated.removeListener(listener);
-                clearTimeout(timer);
-                resolve(tab);
+                if (!isDone) {
+                    isDone = true;
+                    chrome.tabs.onUpdated.removeListener(listener);
+                    clearTimeout(timer);
+                    resolve(tab);
+                }
             }
         }).catch(() => {});
     });
@@ -214,7 +262,7 @@ function waitForTabUrlAndComplete(tabId, urlSubstr, timeoutMs = 15000) {
             if (isDone) return;
             isDone = true;
             chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error(`Timeout waiting for tab to reach target page`));
+            resolve(); // fallback: resolve to let flow continue
         }, timeoutMs);
 
         function checkTab(tab) {
@@ -244,7 +292,6 @@ function waitForTabUrlAndComplete(tabId, urlSubstr, timeoutMs = 15000) {
 
         chrome.tabs.onUpdated.addListener(listener);
 
-        // Immediate check in case tab already reached target or redirected
         chrome.tabs.get(tabId).then(tab => {
             checkTab(tab);
         }).catch(() => {});
@@ -252,7 +299,7 @@ function waitForTabUrlAndComplete(tabId, urlSubstr, timeoutMs = 15000) {
 }
 
 /**
- * Stop any ongoing collection immediately
+ * Stop any ongoing collection immediately without closing user tabs
  */
 async function stopMobileRewardFlow() {
     clearAllTimers();
@@ -266,7 +313,7 @@ async function stopMobileRewardFlow() {
             attachedTabs.delete(activeRewardTabId);
             await chrome.debugger.detach({ tabId: activeRewardTabId }).catch(() => {});
         }
-        await chrome.tabs.remove(activeRewardTabId).catch(() => {});
+        // Do NOT close tab: let user continue viewing their page
         activeRewardTabId = null;
     }
 
@@ -289,12 +336,11 @@ async function stopMobileRewardFlow() {
 
 /**
  * Main execution flow:
- * 1. Immediately opens summary page
- * 2. Opens rewards page in background
- * 3. Sets mobile emulation (393x852)
- * 4. Reloads page
- * 5. Runs coupon collection (completing within <= 25 seconds)
- * 6. Hard safety cutoff ensures completion within 26s under all conditions
+ * 1. Brings/opens rewards page as active tab so user sees all manual scrolling and gestures
+ * 2. Opens summary page in background for live state recording
+ * 3. Applies mobile device emulation (if debugger available)
+ * 4. Runs coupon collection with full visibility
+ * 5. Detaches debugger cleanly without closing user tab
  */
 async function startMobileRewardFlow() {
     // If a previous run is actively in progress within 30s, stop it first to prevent duplicate loops
@@ -312,8 +358,8 @@ async function startMobileRewardFlow() {
     latestSessionCount = 0;
     clearAllTimers();
 
-    // Step 1: Open the summary page IMMEDIATELY so the user can watch live progress
-    await ensureSummaryTab();
+    // Step 1: Open summary page in background tab so progress is persisted
+    await ensureSummaryTab(false);
 
     // Initialize state
     await setAppState({
@@ -333,8 +379,14 @@ async function startMobileRewardFlow() {
         if (existingTabs && existingTabs.length > 0) {
             rewardsTab = existingTabs[0];
             activeRewardTabId = rewardsTab.id;
+            // Focus rewards tab so user can watch manual actions live
+            await chrome.tabs.update(rewardsTab.id, { active: true }).catch(() => {});
+            if (rewardsTab.status !== 'complete') {
+                await waitForTabComplete(rewardsTab.id, 10000);
+            }
         } else {
-            rewardsTab = await chrome.tabs.create({ url: REWARDS_LINK, active: false });
+            // Create active rewards tab so user sees the actions immediately
+            rewardsTab = await chrome.tabs.create({ url: REWARDS_LINK, active: true });
             activeRewardTabId = rewardsTab.id;
             await waitForTabUrlAndComplete(rewardsTab.id, 'amazon.in/h/rewards', 15000);
         }
@@ -353,18 +405,22 @@ async function startMobileRewardFlow() {
                     phase: 'loading',
                     message: 'Loading offers...'
                 });
-                const reloadWait = waitForTabComplete(rewardsTab.id, 15000);
-                await chrome.tabs.reload(rewardsTab.id);
-                await reloadWait;
+                await reloadTabAndWait(rewardsTab.id, 20000);
+                await new Promise(r => setTimeout(r, 800));
             }
         } catch (emuErr) {
             console.warn('Mobile emulation failed, continuing with standard layout:', emuErr);
         }
 
-        // Step 5: Start coupon collection
+        // Ensure rewards tab is focused and active for user to watch
+        if (rewardsTab && rewardsTab.id) {
+            await chrome.tabs.update(rewardsTab.id, { active: true }).catch(() => {});
+        }
+
+        // Step 4: Start coupon collection
         await setAppState({
             phase: 'collecting',
-            message: 'Collecting available coupons...',
+            message: 'Waiting for rewards page to finish loading...',
             current: 0,
             total: 0,
             sessionCollected: 0
@@ -377,34 +433,37 @@ async function startMobileRewardFlow() {
             await handleCollectionFinished(latestSessionCount, rewardsTab?.id);
         }, 180000);
 
+        // Robust message trigger with fallback script injection
         let collectionStarted = false;
-        try {
-            const response = await chrome.tabs.sendMessage(rewardsTab.id, { action: 'collectCoupons' });
-            if (response && response.status === 'started') {
-                collectionStarted = true;
-            }
-        } catch (err) {}
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const response = await chrome.tabs.sendMessage(rewardsTab.id, { action: 'collectCoupons' });
+                if (response && response.status === 'started') {
+                    collectionStarted = true;
+                    break;
+                }
+            } catch (err) {}
 
-        if (!collectionStarted) {
-            await chrome.scripting.executeScript({
-                target: { tabId: rewardsTab.id },
-                files: ['content.js']
-            });
-            await new Promise(r => setTimeout(r, 200));
-            await chrome.tabs.sendMessage(rewardsTab.id, { action: 'collectCoupons' });
+            try {
+                await chrome.scripting.executeScript({
+                    target: { tabId: rewardsTab.id },
+                    files: ['content.js']
+                });
+            } catch (e) {}
+
+            await new Promise(r => setTimeout(r, 400));
         }
 
         return { success: true, tabId: rewardsTab.id };
 
     } catch (error) {
-        console.error('Error in mobile reward flow:', error);
+        console.error('Error in reward flow:', error);
 
         clearAllTimers();
 
         if (error.message === 'LOGIN_REQUIRED') {
-            // User needs to log in; bring tab to foreground and inform user
             if (rewardsTab && rewardsTab.id) {
-                await chrome.tabs.update(rewardsTab.id, { active: true });
+                await chrome.tabs.update(rewardsTab.id, { active: true }).catch(() => {});
                 if (attachedTabs.has(rewardsTab.id)) {
                     attachedTabs.delete(rewardsTab.id);
                     await chrome.debugger.detach({ tabId: rewardsTab.id }).catch(() => {});
@@ -424,14 +483,12 @@ async function startMobileRewardFlow() {
             message: 'Unable to complete collection. Please try again.'
         });
 
-        // Clean up debugger and tab on error
+        // Clean up debugger on error - DO NOT CLOSE USER TAB!
         if (rewardsTab && rewardsTab.id) {
             if (attachedTabs.has(rewardsTab.id)) {
                 attachedTabs.delete(rewardsTab.id);
                 await chrome.debugger.detach({ tabId: rewardsTab.id }).catch(() => {});
             }
-            await chrome.tabs.remove(rewardsTab.id).catch(() => {});
-            activeRewardTabId = null;
         }
 
         return { success: false, error: error.message };
@@ -439,7 +496,7 @@ async function startMobileRewardFlow() {
 }
 
 /**
- * Handle collection finished: record statistics, update state, detach debugger, and close rewards page
+ * Handle collection finished: record statistics, update state, detach debugger, and leave rewards page open
  */
 async function handleCollectionFinished(count, tabId) {
     clearAllTimers();
@@ -474,26 +531,20 @@ async function handleCollectionFinished(count, tabId) {
         await setAppState({
             status: 'done',
             phase: 'done',
-            message: 'All available coupons collected.',
+            message: `All available coupons collected (${collectedCount} total).`,
             current: collectedCount,
             total: collectedCount,
             sessionCollected: collectedCount
         });
 
-        // Detach debugger
+        // Detach debugger cleanly so the banner disappears and user has full normal control
         if (targetTabId && attachedTabs.has(targetTabId)) {
             attachedTabs.delete(targetTabId);
             await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
         }
 
-        // Close rewards page tab
-        if (targetTabId) {
-            await chrome.tabs.remove(targetTabId).catch(() => {});
-        }
+        // Leave rewards tab open so user can see and use their collected coupons!
         activeRewardTabId = null;
-
-        // Ensure summary page is active to view final stats
-        await ensureSummaryTab();
 
     } catch (err) {
         console.error('Error handling collection completion:', err);
@@ -550,7 +601,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// Clean up debugger if tab is closed manually
+// Clean up debugger if tab is closed manually by user
 chrome.tabs.onRemoved.addListener((tabId) => {
     if (attachedTabs.has(tabId)) {
         attachedTabs.delete(tabId);
